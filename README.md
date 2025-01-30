@@ -4,4 +4,4 @@
 
 **DiffE_and_hessian.py:** For superimposition of two structures with Biopython and calculation of inverse hessian with Prody.
 
-**Vector_processing.py:** For visualization of force vectors on ChimeraX. This code generates a `.bild` file using the initial coordinates and weights obtained from an MPR solution. Force arrows can be scaled and customized using the scaling factors.
+**Vector_processing.py:** For visualization of force vectors on ChimeraX 1.8. This code generates a `.bild` file using the initial coordinates and weights obtained from an MPR solution which can be directly open with ChimeraX. Force arrows can be scaled and customized using the scaling factors.
