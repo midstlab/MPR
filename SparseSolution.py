@@ -1,194 +1,177 @@
-
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Mar  5 21:18:49 2024
-
-@author: Burak
-"""
-print("Script execution started.")
-
 import time
-from numpy import ceil, loadtxt, linalg, inner, matmul, zeros
+from numpy import ceil, loadtxt, linalg, inner, matmul, zeros, array, log10, floor
 from gurobipy import GRB, Model, quicksum
 from itertools import combinations
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
+import heapq
 
-# Open a log file to store outputs
-output_file = open("optimization_output.txt", "a")
 
-def PrintToFile(message):
-    print(message)
-    output_file.write(message + "\n")
-    output_file.flush()  # Ensure the message is written immediately
+class Solution:
+    def __init__(self, inner, subset, weights):
+        self.inner = inner
+        self.subset = subset
+        self.weights = weights
+    def __lt__(self, other):
+        return self.inner < other.inner
+
 
 def Output(m):  
-    status_code = {1:'LOADED', 2:'OPTIMAL', 3:'INFEASIBLE', 4:'INF_OR_UNBD', 5:'UNBOUNDED'}
+    status_code = {1: 'LOADED', 2: 'OPTIMAL', 3: 'INFEASIBLE', 4: 'INF_OR_UNBD', 5: 'UNBOUNDED'}
     status = m.status
-    PrintToFile('The optimization status is ' + status_code[status])
-    if status == 2:    
-        PrintToFile('Optimal solution:')
+    print('The optimization status is ' + status_code[status])
+    if status == 2:
+        print('Optimal solution:')
         for v in m.getVars():
-            if abs(v.x) > 10e-5:
-                PrintToFile(str(v.varName) + " = " + str(round(v.x, 5)))    
-        PrintToFile('Optimal objective value: ' + str(m.objVal) + "\n")
+            if abs(v.x) > 1e-5:
+                print(f"{v.varName} = {v.x:.5f}")
+        print('Optimal objective value:', m.objVal, "\n")
+
 
 def Norm2Sq(v):
-    N = len(v)
-    return sum(v[i]**2 for i in range(N))
+    return sum(v[i]**2 for i in range(len(v)))
 
-def LinearSolve(C, R): # solve Cf = R
+
+def LinearSolve(C, R):
     start = time.time()
     f = linalg.solve(C, R)
-    end = time.time()
-    PrintToFile("Time Elapsed in seconds (Linear Solve): " + str(end - start))
+    print("Time Elapsed in seconds (Linear Solve):", time.time() - start)
     return f
 
-def OutputModelToFile(start, end, M, z, y, R, regularization):
-    sol = 0
-    maxIndices = []
+
+def PrintConsole(bestSolutions, timeElapsed):
+    output_lines = ["Time Elapsed in seconds: " + str(timeElapsed)]
+    for i, sol in enumerate(bestSolutions, start=1):
+        output_lines.append(f"Best solution number {i}")
+        output_lines.append("Value: " + str(sol.inner))
+        output_lines.append("Residue Indices (starting from 1): " + str(sol.subset))
+        for j in range(len(sol.subset)):
+            w = sol.weights[3*j:3*j+3]
+            output_lines.append(f"{w[0]},{w[1]},{w[2]}")
+        output_lines.append("")
+    text = "\n".join(output_lines)
+    print(text)
+    with open("results.txt", "a") as f:
+        f.write(text + "\n")
+
+
+def OutputModel(start, end, M, z, y, R, regularization):
+    sol = zeros(len(R))
+    subset = []
     weights = []
-    
     for i in range(M):
-        if z[i].x > 1.0e-3:
-            maxIndices.append(i + 1)
-            weight = []
+        if z[i].x > 1e-3:
+            subset.append(i+1)
             for h in range(3):
-                j = 3 * i + h
-                weight.append(y[j].x)
+                j = 3*i + h
+                weights.append(y[j].x)
                 sol += y[j].x * C[:, j]
-            weights.append(weight)
-    
-    norm_inner = NormalizedInnerProduct(sol, R)
-    elapsed_time = str(end - start)
-    
-    # Write output to file and console
-    PrintToFile("Maximum: " + str(norm_inner))
-    PrintToFile("Time Elapsed in seconds: " + elapsed_time)
-    PrintToFile("Maximizer Residue Indices (starting from 1): " + str(maxIndices))
-    for i in range(len(maxIndices)):
-        PrintToFile(",".join(map(str, weights[i])))
-    PrintToFile("")
-    
-    return norm_inner, elapsed_time, maxIndices, weights
+    return PrintConsole([
+        Solution(NormalizedInnerProduct(sol, R), subset, weights)
+    ], str(end - start))
+
 
 def OptimizationApproach(C, R, K, bigM=100, regularization=-1):
-    PrintToFile("Using the OPTIMIZATION approach with..")
-    if regularization < 0: 
-        PrintToFile("k=" + str(K))
-        PrintToFile("bigM=" + str(bigM))
+    print("Using the OPTIMIZATION approach with k=", K, "bigM=", bigM)
     if regularization >= 0:
-        PrintToFile("Penalty=" + str(regularization))
-
+        print("Penalty=", regularization)
     start = time.time()
     N = len(R)
-    M = int(N/3)
-    
+    M = N // 3
     model = Model('normalizedInnerProduct')
     model.setParam('OutputFlag', False)
-    
-    # Add variables
     y = model.addVars(N, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name='y')
     u = model.addVars(N, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name='u')
-    model.addConstrs(u[i] - quicksum(C[i, j] * y[j] for j in range(N)) == -R[i] for i in range(N))
-    
-    objFunction = quicksum(u[i] * u[i] for i in range(N))
-        
-    if regularization < 0.0:
-        z = model.addVars(M, vtype=GRB.BINARY, name='z') 
-        model.addConstrs(y[i] >= -bigM * z[int(i/3)] for i in range(N))
-        model.addConstrs(y[i] <= bigM * z[int(i/3)] for i in range(N))
+    model.addConstrs(u[i] - quicksum(C[i, j]*y[j] for j in range(N)) == -R[i] for i in range(N))
+    obj = quicksum(u[i]*u[i] for i in range(N))
+    if regularization < 0:
+        z = model.addVars(M, vtype=GRB.BINARY, name='z')
+        model.addConstrs(y[i] >= -bigM*z[i//3] for i in range(N))
+        model.addConstrs(y[i] <=  bigM*z[i//3] for i in range(N))
         model.addConstr(z.sum('*') == K)
-        model.setParam('MIPGap', 1e-3)  
+        model.setParam('MIPGap', 1e-3)
     else:
-        z = model.addVars(M, lb=0, ub=GRB.INFINITY, name='z')  
-        model.addConstrs(y[i] <= z[int(i/3)] for i in range(N))
-        model.addConstrs(-y[i] <= z[int(i/3)] for i in range(N))
-        objFunction = objFunction + regularization * z.sum('*')
-        
-    model.setObjective(objFunction, GRB.MINIMIZE)
+        z = model.addVars(M, lb=0, ub=GRB.INFINITY, name='z')
+        model.addConstrs(y[i] <=  z[i//3] for i in range(N))
+        model.addConstrs(-y[i] <=  z[i//3] for i in range(N))
+        obj += regularization * z.sum('*')
+    model.setObjective(obj, GRB.MINIMIZE)
     model.optimize()
     end = time.time()
-    OutputModelToFile(start, end, M, z, y, R, regularization)
+    OutputModel(start, end, M, z, y, R, regularization)
+
 
 def LeastSquaresSolution(C, R, indices):
-    return linalg.solve(matmul(C[indices, :], C[:, indices]), matmul(C[indices, :], R))
+    return linalg.solve(matmul(C[indices,:], C[:,indices]), matmul(C[indices,:], R))
+
 
 def NormalizedInnerProduct(v, R, R_norm=-1):
     if R_norm < 0:
-        R_norm = linalg.norm(R, 2)
-    return inner(v, R) / (linalg.norm(v, 2) * R_norm)
+        R_norm = linalg.norm(R)
+    return inner(v, R) / (linalg.norm(v) * R_norm)
 
-def EnumerationApproach(C, R, K):
-    PrintToFile("Using the ENUMERATION approach with..")
-    PrintToFile("k=" + str(K))
 
+def EnumerationApproach(C, R, K, best=10):
+    print("Using the ENUMERATION approach with k=", K)
     start = time.time()
     N = len(R)
-    M = int(N/3)
-    maxInner = -1
-    maxInnerIndex = zeros(K)
-    maxWeights = zeros(3*K)
-    R_norm = linalg.norm(R, 2)
-    
-    allSubsets = list(combinations(range(M), K))
-    for subset in allSubsets:
-        indices = []
-        for h in subset:
-            indices += [3 * h, 3 * h + 1, 3 * h + 2]
-        coeff = LeastSquaresSolution(C, R, indices)
-        v = sum(coeff[i] * C[:, indices[i]] for i in range(3 * K))
-        temp = NormalizedInnerProduct(v, R, R_norm)
-        if temp > maxInner:
-            maxInner = temp
-            maxInnerIndex = subset
-            maxWeights = coeff.copy()
-    end = time.time()
-    
-    weights = []
-    for k in range(K):
-        weights.append([maxWeights[3*k], maxWeights[3*k+1], maxWeights[3*k+2]])
-    PrintToFile(f"Maximum: {maxInner}")
-    PrintToFile(f"Time Elapsed in seconds: {end - start}")
-    PrintToFile(f"Maximizer Residue Indices (starting from 1): {[i+1 for i in maxInnerIndex]}")
-    for w in weights:
-        PrintToFile(f"Weights: {w}")
-    PrintToFile("")
-    return ceil(max(abs(maxWeights)))
+    M = N // 3
+    bestSolutions = [Solution(0, [], [])] * best
+    R_norm = linalg.norm(R)
+    inners = []
 
-def PracticalAlgorithm(C, R, Kmin, Kmax, Kstar=5):
+    for subset in combinations(range(M), K):
+        idx = []
+        for h in subset:
+            idx += [3*h, 3*h+1, 3*h+2]
+        coeff = LeastSquaresSolution(C, R, idx)
+        v = sum(coeff[i] * C[:, idx[i]] for i in range(3*K))
+        val = NormalizedInnerProduct(v, R, R_norm)
+        inners.append(val)
+        sol = Solution(val, [s+1 for s in subset], coeff)
+        if heapq.nsmallest(1, bestSolutions)[0].inner < sol.inner:
+            heapq.heapreplace(bestSolutions, sol)
+    end = time.time()
+
+    sorted_inners = sorted(inners, reverse=True)[:best]
+    x_sorted = list(range(1, best+1))
+    plt.figure()
+    plt.scatter(x_sorted, sorted_inners)
+    plt.title(f"k={K} (Top {best} Sorted Decreasing)", fontsize=30)
+    plt.xlabel("Sorted Candidate Index (1–10)", fontsize=30)
+    plt.ylabel("Normalized Inner Product", fontsize=30)
+
+    ax = plt.gca()
+    ticks = ax.get_yticks()
+    if len(ticks) > 1:
+        spacing = abs(ticks[1] - ticks[0])
+        decimal_places = max(0, int(-floor(log10(spacing))))
+        ax.yaxis.set_major_formatter(FormatStrFormatter(f'%.{decimal_places}f'))
+    ax.tick_params(axis='x', labelsize=26)
+    ax.tick_params(axis='y', labelsize=26)
+
+    plt.show()
+
+    top_sols = heapq.nlargest(best, bestSolutions)
+    PrintConsole(top_sols, str(end - start))
+    return ceil(max(abs(sol.weights).max() for sol in top_sols))
+
+
+def PracticalAlgorithm(C, R, Kmin, Kmax, Kstar=3):
     bigM = 0
     for k in range(1, min(Kmax, Kstar) + 1):
-        temp = EnumerationApproach(C, R, k)
-        if temp > bigM:
-            bigM = temp
-    
-    PrintToFile("***")
-    PrintToFile("From preliminary experiments, bigM is chosen as " + str(bigM))
-    PrintToFile("***\n")
-    
+        tmp = EnumerationApproach(C, R, k)
+        bigM = max(bigM, tmp)
+    print("***\nFrom preliminary experiments, bigM is chosen as", bigM, "***\n")
+
     for k in range(Kmin, Kmax + 1):
         OptimizationApproach(C, R, k, bigM)
 
-datasets = {
-    4: ['apo_inv_hessian.dat', 'diffE.dat']  
-}
 
-Kmin, Kmax = 1, 5
-for key in datasets.keys():
-    dataset = datasets[key]
-    C = loadtxt(dataset[0])  
-    R = loadtxt(dataset[1])  
+datasets = {4: ['apo_inv_hessian.dat', 'diffE.dat']}
+Kmin, Kmax = 1, 3
+for key in datasets:
+    C = loadtxt(datasets[key][0])
+    R = loadtxt(datasets[key][1])
     PracticalAlgorithm(C, R, Kmin, Kmax)
 
-
-
-# Close the output file after processing
-output_file.close()
-
-for key in datasets.keys():
-    dataset = datasets[key]
-    print(f"Processing dataset: {dataset}")  # Debug output
-    C = loadtxt(dataset[0])  
-    print(f"Matrix C loaded with shape {C.shape}")  # Debug output
-    R = loadtxt(dataset[1])  
-    print(f"Vector R loaded with shape {R.shape}")  # Debug output
-    PracticalAlgorithm(C, R, Kmin, Kmax)
